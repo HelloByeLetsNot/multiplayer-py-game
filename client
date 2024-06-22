@@ -1,0 +1,196 @@
+import pygame
+import asyncio
+import websockets
+import json
+
+# Screen dimensions and grid settings
+WIDTH, HEIGHT = 800, 600
+TILE_WIDTH = 64
+TILE_HEIGHT = 32
+PLAYER_SIZE = 30
+
+# Player state
+player_position = [4, 4]
+player_direction = "down"
+messages = []
+players = {}
+player_name = ""
+map_boundaries = [0, 0, 20, 15]  # Define map boundaries in grid units
+
+# Initialize Pygame
+pygame.init()
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+clock = pygame.time.Clock()
+font = pygame.font.Font(None, 36)
+
+# Text input box for player name
+input_box = pygame.Rect(WIDTH // 2 - 100, HEIGHT // 2 - 20, 200, 40)
+color_inactive = pygame.Color('lightskyblue3')
+color_active = pygame.Color('dodgerblue2')
+color = color_inactive
+active = False
+text = ''
+name_entered = False
+
+async def connect_to_server():
+    uri = "ws://localhost:6789"
+    async with websockets.connect(uri) as websocket:
+        asyncio.create_task(chat_receiver(websocket))
+        await game_loop(websocket)
+
+async def send_name(websocket):
+    global player_name
+    await websocket.send(json.dumps({"type": "name", "name": player_name}))
+
+async def chat_receiver(websocket):
+    global messages, players
+    async for message in websocket:
+        data = json.loads(message)
+        if data["type"] == "init":
+            players = data["players"]
+            print(f"Initialized with players: {players}")
+        elif data["type"] == "chat":
+            messages.append((data["name"], data["message"]))
+        elif data["type"] == "move":
+            print(f"Received move update: {data}")
+            players[data["player_id"]] = {
+                "position": data["position"],
+                "direction": data["direction"],
+                "name": players.get(data["player_id"], {}).get("name", "")
+            }
+        elif data["type"] == "join":
+            print(f"Player joined: {data}")
+            players[data["player_id"]] = {"position": data["position"], "direction": "down", "name": data["name"]}
+            messages.append((data["name"], "has joined the game"))
+        elif data["type"] == "leave":
+            print(f"Player left: {data}")
+            player_name = players.get(data["player_id"], {}).get("name", "Unknown")
+            messages.append((player_name, "has left the game"))
+            if data["player_id"] in players:
+                del players[data["player_id"]]
+
+async def game_loop(websocket):
+    global player_position, player_direction, name_entered, text, active, color
+
+    done = False
+    while not done:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                return
+            elif event.type == pygame.KEYDOWN:
+                if name_entered:
+                    moved = False
+                    if event.key == pygame.K_LEFT:
+                        if player_position[0] - 1 >= map_boundaries[0]:
+                            player_position[0] -= 1
+                        player_direction = "left"
+                        moved = True
+                    elif event.key == pygame.K_RIGHT:
+                        if player_position[0] + 1 < map_boundaries[2]:
+                            player_position[0] += 1
+                        player_direction = "right"
+                        moved = True
+                    elif event.key == pygame.K_UP:
+                        if player_position[1] - 1 >= map_boundaries[1]:
+                            player_position[1] -= 1
+                        player_direction = "up"
+                        moved = True
+                    elif event.key == pygame.K_DOWN:
+                        if player_position[1] + 1 < map_boundaries[3]:
+                            player_position[1] += 1
+                        player_direction = "down"
+                        moved = True
+                    if moved:
+                        await websocket.send(json.dumps({"type": "move", "position": player_position, "direction": player_direction}))
+                        print(f"Sent move: position={player_position}, direction={player_direction}")
+                    if event.key == pygame.K_LCTRL:
+                        await websocket.send(json.dumps({"type": "attack"}))
+                else:
+                    if active:
+                        if event.key == pygame.K_RETURN:
+                            player_name = text
+                            name_entered = True
+                            await send_name(websocket)
+                        elif event.key == pygame.K_BACKSPACE:
+                            text = text[:-1]
+                        else:
+                            text += event.unicode
+
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if input_box.collidepoint(event.pos):
+                    active = not active
+                else:
+                    active = False
+                color = color_active if active else color_inactive
+
+        screen.fill((0, 0, 0))
+
+        if not name_entered:
+            txt_surface = font.render(text, True, color)
+            width = max(200, txt_surface.get_width() + 10)
+            input_box.w = width
+            screen.blit(txt_surface, (input_box.x + 5, input_box.y + 5))
+            pygame.draw.rect(screen, color, input_box, 2)
+            prompt = font.render("Enter your name:", True, (255, 255, 255))
+            screen.blit(prompt, (input_box.x, input_box.y - 30))
+        else:
+            draw_isometric_grid(screen)
+            draw_players(screen, players, player_position, font)
+            draw_chat(screen, messages, font)
+
+        pygame.display.flip()
+        clock.tick(60)
+
+def cart_to_iso(x, y):
+    iso_x = (x - y) * (TILE_WIDTH // 2)
+    iso_y = (x + y) * (TILE_HEIGHT // 2)
+    return iso_x, iso_y
+
+def get_camera_offset(player_iso_x, player_iso_y):
+    return WIDTH // 2 - player_iso_x, HEIGHT // 2 - player_iso_y
+
+def draw_isometric_grid(screen):
+    player_iso_x, player_iso_y = cart_to_iso(player_position[0], player_position[1])
+    offset_x, offset_y = get_camera_offset(player_iso_x, player_iso_y)
+
+    for x in range(map_boundaries[0], map_boundaries[2]):
+        for y in range(map_boundaries[1], map_boundaries[3]):
+            iso_x, iso_y = cart_to_iso(x, y)
+            iso_x += offset_x
+            iso_y += offset_y
+            pygame.draw.polygon(screen, (200, 200, 200), [
+                (iso_x, iso_y),
+                (iso_x + TILE_WIDTH // 2, iso_y + TILE_HEIGHT // 2),
+                (iso_x, iso_y + TILE_HEIGHT),
+                (iso_x - TILE_WIDTH // 2, iso_y + TILE_HEIGHT // 2)
+            ], 1)
+
+def draw_players(screen, players, current_position, font):
+    player_iso_x, player_iso_y = cart_to_iso(current_position[0], current_position[1])
+    offset_x, offset_y = get_camera_offset(player_iso_x, player_iso_y)
+
+    # Draw the current player
+    iso_x, iso_y = player_iso_x + offset_x, player_iso_y + offset_y
+    pygame.draw.rect(screen, (255, 0, 0), (iso_x - PLAYER_SIZE // 2, iso_y - PLAYER_SIZE // 2, PLAYER_SIZE, PLAYER_SIZE))
+    name_text = font.render(player_name, True, (255, 255, 255))
+    screen.blit(name_text, (iso_x - name_text.get_width() // 2, iso_y - PLAYER_SIZE // 2 - 20))
+
+    # Draw other players
+    for pid, player in players.items():
+        if player["position"] != [-1, -1]:
+            iso_x, iso_y = cart_to_iso(player["position"][0], player["position"][1])
+            iso_x += offset_x
+            iso_y += offset_y
+            pygame.draw.rect(screen, (0, 0, 255), (iso_x - PLAYER_SIZE // 2, iso_y - PLAYER_SIZE // 2, PLAYER_SIZE, PLAYER_SIZE))
+            name_text = font.render(player["name"], True, (255, 255, 255))
+            screen.blit(name_text, (iso_x - name_text.get_width() // 2, iso_y - PLAYER_SIZE // 2 - 20))
+
+def draw_chat(screen, messages, font):
+    y = 10
+    for name, message in messages:
+        chat_text = font.render(f"{name}: {message}", True, (255, 255, 255))
+        screen.blit(chat_text, (10, y))
+        y += 20
+
+asyncio.run(connect_to_server())
