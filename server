@@ -1,0 +1,63 @@
+import asyncio
+import websockets
+import json
+import uuid
+
+clients = {}  # Store active clients
+player_data = {}  # Store player positions and states
+
+async def handle_client(websocket, path):
+    player_id = str(uuid.uuid4())  # Generate a unique ID for each client
+    clients[player_id] = websocket
+    player_data[player_id] = {"position": [4, 4], "direction": "down", "name": f"Player_{player_id}"}
+    print(f"Player {player_id} connected")
+
+    try:
+        # Send existing player data to the new player
+        await websocket.send(json.dumps({"type": "init", "players": player_data}))
+
+        # Notify all other players of the new player
+        await broadcast({
+            "type": "join",
+            "player_id": player_id,
+            "name": player_data[player_id]["name"],
+            "position": player_data[player_id]["position"]
+        })
+
+        async for message in websocket:
+            data = json.loads(message)
+            if data["type"] == "name":
+                player_data[player_id]["name"] = data["name"]
+                print(f"Received name update from {player_id}: {data['name']}")
+                await broadcast({"type": "name_update", "player_id": player_id, "name": data["name"]})
+            elif data["type"] == "move":
+                print(f"Received move from {player_id}: {data}")
+                await handle_move(player_id, data["position"], data["direction"])
+            elif data["type"] == "attack":
+                print(f"Received attack from {player_id}")
+    except websockets.ConnectionClosed:
+        print(f"Player {player_id} disconnected")
+    finally:
+        if player_id in clients:
+            del clients[player_id]
+        if player_id in player_data:
+            await broadcast({"type": "leave", "player_id": player_id, "name": player_data[player_id]["name"]})
+            del player_data[player_id]
+
+async def handle_move(player_id, position, direction):
+    player_data[player_id]["position"] = position
+    player_data[player_id]["direction"] = direction
+    print(f"Broadcasting move: {player_id}, position: {position}, direction: {direction}")
+    await broadcast({"type": "move", "player_id": player_id, "position": position, "direction": direction})
+
+async def broadcast(message):
+    print(f"Broadcasting: {message}")
+    for client_id, client in clients.items():
+        try:
+            await client.send(json.dumps(message))
+        except websockets.ConnectionClosed:
+            pass
+
+start_server = websockets.serve(handle_client, "localhost", 6789)
+asyncio.get_event_loop().run_until_complete(start_server)
+asyncio.get_event_loop().run_forever()
